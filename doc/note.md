@@ -5,6 +5,7 @@ pip install -c "nvidia/label/cuda-11.8.0" cuda-nvcc
 conda create --name video-subtitle python=3.12
 conda install -c "nvidia/label/cuda-11.8.0" cuda-nvcc
 conda install -c conda-forge cudnn=8
+conda run -n video-subtitle pip install paddlepaddle-gpu==3.3.1 -i https://www.paddlepaddle.org.cn/packages/stable/cu118/
 conda install --file requirements-1.txt
 pip install -r requirements-2.txt
 conda env export > video-subtitle.yml
