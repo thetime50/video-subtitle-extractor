@@ -16,7 +16,7 @@ from collections import namedtuple
 from backend.config import tr
 
 
-def extract_subtitles(data, text_recogniser, img, raw_subtitles,
+def extract_subtitles(data, text_recogniser:OcrRecogniser, img, raw_subtitles,
                       sub_area, options, dt_box_arg, rec_res_arg, ocr_loss_debug_path):
     """
     提取视频帧中的字幕信息
@@ -38,6 +38,10 @@ def extract_subtitles(data, text_recogniser, img, raw_subtitles,
         text_res = [(res[0], res[1]) for res in rec_res]
     line = ''
     loss_list = []
+    if sub_area is not None and options.SUB_AREA == SubtitleArea.LOWER_PART:
+        sub_area = sub_area.clone()
+        sub_area.ymin = sub_area.ymin - img.shape[0]
+        sub_area.ymax = sub_area.ymax - img.shape[0]
     for content, coordinate in zip(text_res, coordinates):
         text = content[0]
         prob = content[1]
@@ -241,9 +245,9 @@ def subtitle_extract_handler(task_queue, progress_queue, video_path, raw_subtitl
                                        args=(ocr_queue, raw_subtitle_path, sub_area, video_path, options, progress_queue,),
                                        daemon=True)
     # 开启消费者线程
-    ocr_event_producer_thread.start()
-    # 开启生产者线程
     ocr_event_consumer_thread.start()
+    # 开启生产者线程
+    ocr_event_producer_thread.start()
     # join方法让主线程任务结束之后，进入阻塞状态，一直等待其他的子线程执行结束之后，主线程再终止
     ocr_event_producer_thread.join()
     ocr_event_consumer_thread.join()

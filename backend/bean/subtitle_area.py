@@ -46,3 +46,6 @@ class SubtitleArea:
 
     def to_polygon(self):
         return Polygon([[self.xmin, self.ymin], [self.xmax, self.ymin], [self.xmax, self.ymax], [self.xmin, self.ymax]])
+    
+    def clone(self):
+        return SubtitleArea(self.ymin, self.ymax, self.xmin, self.xmax, self.ab_section)

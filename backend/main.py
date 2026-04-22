@@ -1036,6 +1036,7 @@ class SubtitleExtractor:
             'REC_CHAR_TYPE': config.language.value,
             'DROP_SCORE': config.dropScore.value / 100.0,
             'SUB_AREA_DEVIATION_RATE': config.subtitleAreaDeviationRate.value / 100.0,
+            'SUB_AREA': config.subtitleArea.value,
             'DEBUG_OCR_LOSS': config.debugOcrLoss.value,
             'HARDWARD_ACCELERATOR': self.hardware_accelerator,
         }
