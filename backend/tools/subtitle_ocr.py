@@ -51,6 +51,8 @@ def extract_subtitles(data, text_recogniser:OcrRecogniser, img, raw_subtitles,
             overflow_area_rate = 0
             # 使用AABB矩形重叠判断（比Shapely Polygon快得多）
             c_xmin, c_xmax, c_ymin, c_ymax = coordinate
+            c_width = c_xmax - c_xmin
+            c_height = c_ymax - c_ymin
             # 计算交集矩形
             inter_xmin = max(sub_area.xmin, c_xmin)
             inter_ymin = max(sub_area.ymin, c_ymin)
@@ -70,7 +72,15 @@ def extract_subtitles(data, text_recogniser:OcrRecogniser, img, raw_subtitles,
                 # 如果越界比例低于设定阈值且该行文本识别的置信度高于设定阈值
                 not_overflow = overflow_area_rate <= options.SUB_AREA_DEVIATION_RATE
                 confident = prob > options.DROP_SCORE
-                if not_overflow and confident:
+
+                # 宽度或者高度小于字体大小参考，则不保留该帧
+                font_size_too_small = False
+                if sub_area.fwidth is not None and c_width < sub_area.fwidth:
+                    font_size_too_small = True
+                if sub_area.fheight is not None and c_height < sub_area.fheight:
+                    font_size_too_small = True
+
+                if not_overflow and confident and not font_size_too_small:
                     # 保留该帧
                     selected = True
                     line += f'{str(data["i"]).zfill(8)}\t{coordinate}\t{text}\n'
@@ -80,6 +90,8 @@ def extract_subtitles(data, text_recogniser:OcrRecogniser, img, raw_subtitles,
                         drop_reason = tr['Main']['OcrDropOutOfBoxRate'].format(int(options.SUB_AREA_DEVIATION_RATE * 100), int(overflow_area_rate * 100))
                     elif not confident:
                         drop_reason = tr['Main']['OcrDropConfidentLow'].format(int(options.DROP_SCORE * 100))
+                    elif font_size_too_small:
+                        drop_reason = tr['Main']['OcrDropFontSizeTooSmall'].format((c_width, c_height), (sub_area.fwidth, sub_area.fheight))
             else:
                 drop_reason = tr['Main']['OcrDropNoIntercetion']
             if drop_reason:

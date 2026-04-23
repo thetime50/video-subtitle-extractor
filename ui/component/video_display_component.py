@@ -692,9 +692,9 @@ class VideoDisplayComponent(QWidget):
                 self.form_rects_old = None
             else:
                 self.selection_rect.fymin = 0
-                self.selection_rect.fymax = 30/self.video_display.size().height()
+                self.selection_rect.fymax = 25/self.video_display.size().height()
                 self.selection_rect.fxmin = 0
-                self.selection_rect.fxmax = 30/self.video_display.size().width()
+                self.selection_rect.fxmax = 25/self.video_display.size().width()
             self.update_preview_with_rect()
         elif self.resize_edge and self.active_selection_index >= 0:  # 调整选择框大小或位置
             rect = self.selection_rects[self.active_selection_index]
@@ -927,8 +927,8 @@ class VideoDisplayComponent(QWidget):
                 parts = area.split(",")
                 ymin, ymax, xmin, xmax = map(float, parts)
                 selection_rects.append(SubtitleArea(ymin, ymax, xmin, xmax, 
-                    fymin=0, fymax=30/self.video_display.size().height(), 
-                    fxmin=0, fxmax=30/self.video_display.size().width()))
+                    fymin=0, fymax=25/self.video_display.size().height(), 
+                    fxmin=0, fxmax=25/self.video_display.size().width()))
             except ValueError:
                 continue
         
@@ -966,9 +966,32 @@ class VideoDisplayComponent(QWidget):
             xmax = max(0, min(xmax, self.frame_width))
             ymin = max(0, min(ymin, self.frame_height))
             ymax = max(0, min(ymax, self.frame_height))
+
             
-            _rect = SubtitleArea(ymin, ymax, xmin, xmax, rect.ab_section)
+            # 调整选择框坐标，考虑黑边偏移
+            fx_adjusted = max(0, rect.fxmin_g - self.border_left)
+            fy_adjusted = max(0, rect.fymin_g - self.border_top)
+            
+            # 如果选择框超出了实际视频区域，需要调整宽度和高度
+            fw_adjusted = min(rect.fwidth, self.scaled_width - x_adjusted)
+            fh_adjusted = min(rect.fheight, self.scaled_height - y_adjusted)
+
+            # 使用round代替int，避免精度丢失
+            fxmin = round(fx_adjusted * scale_x * video_display_width)
+            fxmax = round((fx_adjusted + fw_adjusted) * scale_x * video_display_width)
+            fymin = round(fy_adjusted * scale_y * video_display_height)
+            fymax = round((fy_adjusted + fh_adjusted) * scale_y * video_display_height)
+            
+            # 确保坐标在有效范围内
+            fxmin = max(0, min(fxmin, self.frame_width))
+            fxmax = max(0, min(fxmax, self.frame_width))
+            fymin = max(0, min(fymin, self.frame_height))
+            fymax = max(0, min(fymax, self.frame_height))
+            
+            _rect = SubtitleArea(ymin, ymax, xmin, xmax, rect.ab_section,
+                fymin=fymin, fymax=fymax, fxmin=fxmin, fxmax=fxmax)
             _rect.normalized()
+            # _rect.normalized_font_rect()
             selection_rects.append(_rect)
         return selection_rects
 
