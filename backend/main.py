@@ -1039,6 +1039,9 @@ class SubtitleExtractor:
             'SUB_AREA': config.subtitleArea.value,
             'DEBUG_OCR_LOSS': config.debugOcrLoss.value,
             'HARDWARD_ACCELERATOR': self.hardware_accelerator,
+
+            'VIDEO_FPS': self.fps,
+            'TEMP_OUTPUT_DIR': self.temp_output_dir,
         }
         process, task_queue, progress_queue = subtitle_ocr.async_start(self.video_path, self.raw_subtitle_path, self.sub_area, options)
         ProcessManager.instance().add_process(process)

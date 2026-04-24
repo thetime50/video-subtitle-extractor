@@ -11,6 +11,8 @@ class SubtitleArea(Enum):
     UNKNOWN = 2
     # 明确知道字幕区域出现的位置
     # CUSTOM = 3
+    # 使用vsf提取字幕帧
+    AREA_VFS = 4
 
 
 class BackgroundColor(Enum):

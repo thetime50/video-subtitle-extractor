@@ -16,17 +16,76 @@ from collections import namedtuple
 from backend.config import tr
 
 
+def area_vfs_predict(data, text_recogniser:OcrRecogniser, img, raw_subtitles,
+                      sub_area, options, dt_box_arg, rec_res_arg, ocr_loss_debug_path):
+    """
+    通过vsf提取视频帧中的字幕信息
+    """
+
+    # frame_no = data["i"]
+    # fps = options['VIDEO_FPS']
+    # total_ms = frame_no/fps * 1000
+    # # ms时间戳转为 h_mm_ss_ms 格式
+    # ms = int(total_ms)
+    # hours = ms // 3600000
+    # ms_remainder = ms % 3600000
+    # minutes = ms_remainder // 60000
+    # ms_remainder = ms_remainder % 60000
+    # seconds = ms_remainder // 1000
+    # milliseconds = ms_remainder % 1000
+    # time_start_str = f"{hours:01d}_{minutes:02d}_{seconds:02d}_{milliseconds:03d}__"
+    # # 检查 output\0 test\RGBImages
+    # temp_output_dir = options['TEMP_OUTPUT_DIR']
+    # rgb_images_path = os.path.join(temp_output_dir, 'RGBImages')
+    # if not os.path.exists(rgb_images_path):
+    #     # 报错
+    #     raise ValueError("AREA_VFS 提取 rgb_images_path not found")
+    # # 从rgb_images_path目录下找到第一个time_start_str 开头 .jpg结尾的文件
+    # jpg_file = next((f for f in os.listdir(rgb_images_path) if f.startswith(time_start_str) and f.endswith('.jpg')), None)
+    # if jpg_file is None:
+    #     # 报错
+    #     raise ValueError("AREA_VFS 提取 jpg_file not found")
+    # # 读取文件
+    # file_path = os.path.join(rgb_images_path, jpg_file)
+    # pimg = cv2.imread(file_path)
+
+    # 通过sub_area 从img中裁剪出子区域
+    pimg = img[sub_area.ymin:sub_area.ymax, sub_area.xmin:sub_area.xmax]
+    
+    # 提取字幕
+    dt_box, rec_res = text_recogniser.predict(pimg)
+    return dt_box, rec_res
+
+
+
 def extract_subtitles(data, text_recogniser:OcrRecogniser, img, raw_subtitles,
                       sub_area, options, dt_box_arg, rec_res_arg, ocr_loss_debug_path):
     """
     提取视频帧中的字幕信息
+
+    :param data: 当前帧上下文数据，使用 data["i"] 作为帧号
+    :param text_recogniser: OCR 识别器实例（OcrRecogniser）
+    :param img: 当前视频帧图像（numpy.ndarray）
+    :param raw_subtitles: 原始字幕结果输出列表（就地追加）
+    :param sub_area: 字幕区域约束对象（可为 None）
+    :param options: 提取配置项（语言、阈值、字幕区域模式等）
+    :param dt_box_arg: 可选检测框缓存，传入可避免重复检测
+    :param rec_res_arg: 可选识别结果缓存，传入可避免重复识别
+    :param ocr_loss_debug_path: OCR 丢失调试信息输出目录
     """
+
     # 从参数中获取检测框与检测结果
     dt_box = dt_box_arg
     rec_res = rec_res_arg
+    check_sub_area = True
     # 如果没有检测结果，则获取检测结果
     if dt_box is None or rec_res is None:
-        dt_box, rec_res = text_recogniser.predict(img)
+        if options.SUB_AREA == SubtitleArea.AREA_VFS:
+            check_sub_area = False
+            dt_box, rec_res = area_vfs_predict(data, text_recogniser, img, raw_subtitles,
+                      sub_area, options, dt_box_arg, rec_res_arg, ocr_loss_debug_path)
+        else:
+            dt_box, rec_res = text_recogniser.predict(img)
         # rec_res格式为： ("hello", 0.997)
     # 获取文本坐标
     coordinates = get_coordinates(dt_box)
@@ -46,54 +105,59 @@ def extract_subtitles(data, text_recogniser:OcrRecogniser, img, raw_subtitles,
         text = content[0]
         prob = content[1]
         if sub_area is not None:
+            has_intersection = True
+            not_overflow = True
+            confident = True
             selected = False
+            drop_reason = ''
             # 初始化超界偏差为0
             overflow_area_rate = 0
             # 使用AABB矩形重叠判断（比Shapely Polygon快得多）
             c_xmin, c_xmax, c_ymin, c_ymax = coordinate
             c_width = c_xmax - c_xmin
             c_height = c_ymax - c_ymin
-            # 计算交集矩形
-            inter_xmin = max(sub_area.xmin, c_xmin)
-            inter_ymin = max(sub_area.ymin, c_ymin)
-            inter_xmax = min(sub_area.xmax, c_xmax)
-            inter_ymax = min(sub_area.ymax, c_ymax)
-            has_intersection = inter_xmin < inter_xmax and inter_ymin < inter_ymax
-            drop_reason = ''
-            # 如果有交集
-            if has_intersection:
-                sub_area_w = sub_area.xmax - sub_area.xmin
-                sub_area_h = sub_area.ymax - sub_area.ymin
-                sub_area_size = sub_area_w * sub_area_h
-                inter_area = (inter_xmax - inter_xmin) * (inter_ymax - inter_ymin)
-                coord_area = (c_xmax - c_xmin) * (c_ymax - c_ymin)
-                # 计算越界允许偏差
-                overflow_area_rate = ((sub_area_size + coord_area - inter_area) / sub_area_size) - 1
-                # 如果越界比例低于设定阈值且该行文本识别的置信度高于设定阈值
-                not_overflow = overflow_area_rate <= options.SUB_AREA_DEVIATION_RATE
-                confident = prob > options.DROP_SCORE
+            if check_sub_area:
+                # 计算交集矩形
+                inter_xmin = max(sub_area.xmin, c_xmin)
+                inter_ymin = max(sub_area.ymin, c_ymin)
+                inter_xmax = min(sub_area.xmax, c_xmax)
+                inter_ymax = min(sub_area.ymax, c_ymax)
+                has_intersection = inter_xmin < inter_xmax and inter_ymin < inter_ymax
+                # 如果有交集
+                if has_intersection:
+                    sub_area_w = sub_area.xmax - sub_area.xmin
+                    sub_area_h = sub_area.ymax - sub_area.ymin
+                    sub_area_size = sub_area_w * sub_area_h
+                    inter_area = (inter_xmax - inter_xmin) * (inter_ymax - inter_ymin)
+                    coord_area = (c_xmax - c_xmin) * (c_ymax - c_ymin)
+                    # 计算越界允许偏差
+                    overflow_area_rate = ((sub_area_size + coord_area - inter_area) / sub_area_size) - 1
+                    # 如果越界比例低于设定阈值且该行文本识别的置信度高于设定阈值
+                    not_overflow = overflow_area_rate <= options.SUB_AREA_DEVIATION_RATE
+            # 是否置信度高于设定阈值
+            confident = prob > options.DROP_SCORE
 
-                # 宽度或者高度小于字体大小参考，则不保留该帧
-                font_size_too_small = False
-                if sub_area.fwidth is not None and c_width < sub_area.fwidth:
-                    font_size_too_small = True
-                if sub_area.fheight is not None and c_height < sub_area.fheight:
-                    font_size_too_small = True
+            # 宽度或者高度小于字体大小参考，则不保留该帧
+            font_size_too_small = False
+            if sub_area.fwidth is not None and c_width < sub_area.fwidth:
+                font_size_too_small = True
+            if sub_area.fheight is not None and c_height < sub_area.fheight:
+                font_size_too_small = True
 
-                if not_overflow and confident and not font_size_too_small:
-                    # 保留该帧
-                    selected = True
-                    line += f'{str(data["i"]).zfill(8)}\t{coordinate}\t{text}\n'
-                    raw_subtitles.append(f'{str(data["i"]).zfill(8)}\t{coordinate}\t{text}\n')
-                else:
-                    if not not_overflow:
-                        drop_reason = tr['Main']['OcrDropOutOfBoxRate'].format(int(options.SUB_AREA_DEVIATION_RATE * 100), int(overflow_area_rate * 100))
-                    elif not confident:
-                        drop_reason = tr['Main']['OcrDropConfidentLow'].format(int(options.DROP_SCORE * 100))
-                    elif font_size_too_small:
-                        drop_reason = tr['Main']['OcrDropFontSizeTooSmall'].format((c_width, c_height), (sub_area.fwidth, sub_area.fheight))
+            if has_intersection and not_overflow and confident and not font_size_too_small:
+                # 保留该帧
+                selected = True
+                line += f'{str(data["i"]).zfill(8)}\t{coordinate}\t{text}\n'
+                raw_subtitles.append(f'{str(data["i"]).zfill(8)}\t{coordinate}\t{text}\n')
             else:
-                drop_reason = tr['Main']['OcrDropNoIntercetion']
+                if not has_intersection:
+                    drop_reason = tr['Main']['OcrDropNoIntercetion']
+                elif not not_overflow:
+                    drop_reason = tr['Main']['OcrDropOutOfBoxRate'].format(int(options.SUB_AREA_DEVIATION_RATE * 100), int(overflow_area_rate * 100))
+                elif not confident:
+                    drop_reason = tr['Main']['OcrDropConfidentLow'].format(int(options.DROP_SCORE * 100))
+                elif font_size_too_small:
+                    drop_reason = tr['Main']['OcrDropFontSizeTooSmall'].format((c_width, c_height), (sub_area.fwidth, sub_area.fheight))
             if drop_reason:
                 tqdm.write(tr['Main']['OcrResultWithDropReason'].format(text, round(prob * 100,1), drop_reason))
             else:
