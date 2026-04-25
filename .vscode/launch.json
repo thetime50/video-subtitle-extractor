@@ -12,6 +12,15 @@
             "python": "E:/Users/holid/anaconda3/envs/video-subtitle/python.exe",
             "env": {},
             "args": []
+        },
+        {
+            "name": "Text Format Debugger",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "backend/tools/text_format.py",
+            "python": "E:/Users/holid/anaconda3/envs/video-subtitle/python.exe",
+            "env": {},
+            "args": ["--input", "F:/live/know/渤海小吏/三国争霸/0 test.txt", "--segment-level", "2"]
         }
     ]
 }

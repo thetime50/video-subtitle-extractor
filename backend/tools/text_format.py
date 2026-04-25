@@ -1,11 +1,13 @@
 import argparse
 import json
+import queue
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 from tqdm import tqdm
@@ -22,7 +24,7 @@ class Chunk:
 
 @dataclass
 class FormatterOptions:
-    input: str = ""
+    input: List[str] = field(default_factory=list)
     output: str = ""
     segment_level: int = 2
     stdin: bool = False
@@ -34,7 +36,13 @@ class FormatterOptions:
     retries: int = 3
 
     def __init__(self, args: argparse.Namespace):
-        self.input = str(getattr(args, "input", self.input) or "")
+        raw_input = getattr(args, "input", [])
+        if raw_input is None:
+            self.input = []
+        elif isinstance(raw_input, str):
+            self.input = [raw_input]
+        else:
+            self.input = [str(item) for item in raw_input if str(item).strip()]
         self.output = str(getattr(args, "output", self.output) or "")
         self.segment_level = int(getattr(args, "segment_level", self.segment_level))
         self.stdin = bool(getattr(args, "stdin", self.stdin))
@@ -192,6 +200,104 @@ class ChunkMerger:
         return merged
 
 
+class ConcurrentChatCompletionManager:
+    def __init__(
+        self,
+        client: DeepSeekClient,
+        concurrency: int = 3,
+        max_attempts: int = 2,
+        error_threshold: int = 3,
+        cooldown_seconds: int = 3,
+    ):
+        if concurrency <= 0:
+            raise ValueError("concurrency 必须大于 0。")
+        self.client = client
+        self.concurrency = concurrency
+        self.max_attempts = max_attempts
+        self.error_threshold = error_threshold
+        self.cooldown_seconds = cooldown_seconds
+
+    def run(self, message_batches: List[List[Dict[str, str]]], progress_desc: str = "分片转换进度") -> List[str]:
+        if not message_batches:
+            return []
+
+        results: List[Optional[str]] = [None] * len(message_batches)
+        pending_indices = list(range(len(message_batches)))
+        attempt = 1
+        completed = set()
+        errors: Dict[int, str] = {}
+
+        with tqdm(total=len(message_batches), desc=progress_desc, unit="片") as bar:
+            while pending_indices and attempt <= self.max_attempts:
+                failed_indices: List[int] = []
+                consecutive_errors = 0
+                task_queue: queue.Queue[int] = queue.Queue()
+                result_queue: queue.Queue = queue.Queue()
+                for index in pending_indices:
+                    task_queue.put(index)
+
+                def worker() -> None:
+                    while True:
+                        try:
+                            index = task_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        try:
+                            text = self.client.chat_completion(message_batches[index])
+                            result_queue.put((index, True, text))
+                        except Exception as error:
+                            result_queue.put((index, False, str(error)))
+                        finally:
+                            task_queue.task_done()
+
+                worker_count = min(self.concurrency, len(pending_indices))
+                threads: List[threading.Thread] = []
+                for _ in range(worker_count):
+                    thread = threading.Thread(target=worker, daemon=True)
+                    thread.start()
+                    threads.append(thread)
+
+                processed_count = 0
+                total_count = len(pending_indices)
+                while processed_count < total_count:
+                    index, is_success, payload = result_queue.get()
+                    processed_count += 1
+                    if is_success:
+                        results[index] = str(payload)
+                        errors.pop(index, None)
+                        consecutive_errors = 0
+                        if index not in completed:
+                            completed.add(index)
+                            bar.update(1)
+                    else:
+                        failed_indices.append(index)
+                        errors[index] = str(payload)
+                        consecutive_errors += 1
+                        if consecutive_errors >= self.error_threshold:
+                            time.sleep(self.cooldown_seconds)
+                            consecutive_errors = 0
+
+                for thread in threads:
+                    thread.join()
+
+                if not failed_indices:
+                    break
+                if attempt >= self.max_attempts:
+                    break
+                time.sleep(self.cooldown_seconds)
+                pending_indices = failed_indices
+                attempt += 1
+
+        remaining = [index for index, value in enumerate(results) if not value]
+        if remaining:
+            failed_text = ", ".join(str(index + 1) for index in remaining)
+            detail = "; ".join(f"分片{index + 1}:{errors.get(index, '未知错误')}" for index in remaining)
+            raise RuntimeError(
+                f"并发请求失败，已达到最大尝试次数({self.max_attempts})。失败分片：{failed_text}。{detail}"
+            )
+        return [value for value in results if value is not None]
+
+
 class SubtitleFormatterService:
     def __init__(self, client: DeepSeekClient, prompt_builder: PromptBuilder, chunker: TextChunker, merger: ChunkMerger):
         self.client = client
@@ -208,7 +314,7 @@ class SubtitleFormatterService:
                 paragraphs.append(line)
         return "\n".join(paragraphs)
 
-    def format_text(self, text: str, segment_level: int) -> Dict[str, object]:
+    def format_text(self, text: str, segment_level: int, concurrency: int = 3, progress_info: str = "") -> Dict[str, object]:
         original_text = text
         chunks = self.chunker.split(text)
         if not chunks:
@@ -224,9 +330,12 @@ class SubtitleFormatterService:
 
         formatted_parts: List[str] = []
         start_time = time.time()
-        for chunk in tqdm(chunks, desc="分片转换进度", unit="片"):
-            messages = self.prompt_builder.build_messages(chunk=chunk, segment_level=segment_level)
-            formatted = self.client.chat_completion(messages)
+        message_batches: List[List[Dict[str, str]]] = []
+        for chunk in chunks:
+            message_batches.append(self.prompt_builder.build_messages(chunk=chunk, segment_level=segment_level))
+        manager = ConcurrentChatCompletionManager(client=self.client, concurrency=concurrency)
+        raw_results = manager.run(message_batches=message_batches, progress_desc=f"进度 {progress_info}")
+        for chunk, formatted in zip(chunks, raw_results):
             normalized = self._normalize_output(formatted)
             if not normalized:
                 raise RuntimeError(f"第 {chunk.index + 1} 个分片返回空内容，已中止。")
@@ -290,7 +399,7 @@ class SubtitleFormatterRunner:
         else:
             output_path.write_text(str(result["formatted_text"]), encoding="utf-8")
 
-    def convert_text(self, text: str, segment_level: int, output_format: str) -> Dict[str, object]:
+    def convert_text(self, text: str, segment_level: int, output_format: str, progress_info: str = "") -> Dict[str, object]:
         first_ten_lines = text
         line_count = 0
         for index, char in enumerate(text):
@@ -304,7 +413,7 @@ class SubtitleFormatterRunner:
         if re.search(srt_pattern, first_ten_lines):
             text = re.sub(srt_pattern, "", text)
 
-        result = self.service.format_text(text=text, segment_level=segment_level)
+        result = self.service.format_text(text=text, segment_level=segment_level, progress_info=progress_info)
         if output_format == "json":
             return result
         return {
@@ -319,6 +428,7 @@ class SubtitleFormatterRunner:
         segment_level: int,
         output_format: str,
         output_file: str = "",
+        progress_info: str = "",
     ) -> Path:
         if not input_file:
             raise ValueError("未提供输入文件，请使用 --input 或 --stdin。")
@@ -327,7 +437,7 @@ class SubtitleFormatterRunner:
             raise FileNotFoundError(f"输入文件不存在：{input_path}")
         content = input_path.read_text(encoding="utf-8")
         text = content
-        result = self.convert_text(text=text, segment_level=segment_level, output_format=output_format)
+        result = self.convert_text(text=text, segment_level=segment_level, output_format=output_format, progress_info=progress_info)
         output_path = self.resolve_output_path(
             output_file=output_file,
             use_stdin=False,
@@ -358,7 +468,7 @@ def parse_args() -> argparse.Namespace:
         description="使用 DeepSeek 为字幕文本自动添加标点并分段。",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=42, width=120),
     )
-    parser.add_argument("--input", type=str, help="输入文本文件路径。")
+    parser.add_argument("--input", type=str, nargs="+", help="输入路径列表（文件或目录）。")
     parser.add_argument("--output", type=str, help="输出文件路径。")
     parser.add_argument("--segment-level", type=int, default=2, choices=[1, 2, 3], help="分段等级：1-粗 2-中 3-细。")
     parser.add_argument("--stdin", action="store_true", help="从标准输入读取文本。")
@@ -389,6 +499,79 @@ def load_private_api_key() -> str:
     return api_key
 
 
+def collect_input_files(input_items: List[str]) -> List[Path]:
+    file_paths: List[Path] = []
+    for item in input_items:
+        path = Path(item)
+        if not path.exists():
+            raise FileNotFoundError(f"输入路径不存在：{path}")
+        if path.is_file():
+            file_paths.append(path)
+            continue
+        if path.is_dir():
+            for child in sorted(path.rglob("*")):
+                if child.is_file():
+                    file_paths.append(child)
+            continue
+        raise ValueError(f"不支持的输入路径类型：{path}")
+
+    # 去重并保持顺序
+    unique_files: List[Path] = []
+    seen = set()
+    for path in file_paths:
+        key = str(path.resolve())
+        if key not in seen:
+            seen.add(key)
+            unique_files.append(path)
+    return unique_files
+
+
+def build_output_paths(
+    input_files: List[Path],
+    output_arg: str,
+    output_format: str,
+    runner: SubtitleFormatterRunner,
+) -> List[Path]:
+    if not input_files:
+        raise ValueError("未找到可处理的输入文件。")
+
+    if len(input_files) == 1:
+        if not output_arg:
+            input_file = str(input_files[0])
+            output_path = runner.resolve_output_path(
+                output_file=output_arg,
+                use_stdin=False,
+                output_format=output_format,
+                input_file=input_file,
+            )
+            return [output_path]
+        else:
+            return [output_arg]
+
+    if output_arg:
+        output_base = Path(output_arg)
+        if output_base.exists() and not output_base.is_dir():
+            raise ValueError("当输入文件数量大于1时，--output 必须为空或目录路径。")
+    else:
+        output_base = Path("")
+
+    ext = "json" if output_format == "json" else "txt"
+    output_paths: List[Path] = []
+    for input_file in input_files:
+        if output_arg:
+            output_paths.append(output_base / f"{input_file.stem}.fmt.{ext}")
+        else:
+            output_paths.append(
+                runner.resolve_output_path(
+                    output_file="",
+                    use_stdin=False,
+                    output_format=output_format,
+                    input_file=str(input_file),
+                )
+            )
+    return output_paths
+
+
 def main() -> int:
     try:
         options = FormatterOptions(parse_args())
@@ -405,14 +588,25 @@ def main() -> int:
                 output_format=options.format,
                 output_file=options.output,
             )
+            print(f"处理完成，输出文件：{output_path}")
         else:
-            output_path = runner.convert_file(
-                input_file=options.input,
-                segment_level=options.segment_level,
+            input_files = collect_input_files(options.input)
+            output_paths = build_output_paths(
+                input_files=input_files,
+                output_arg=options.output,
                 output_format=options.format,
-                output_file=options.output,
+                runner=runner,
             )
-        print(f"处理完成，输出文件：{output_path}")
+            for index, (input_file, output_path) in enumerate(zip(input_files, output_paths)):
+                runner.convert_file(
+                    input_file=str(input_file),
+                    segment_level=options.segment_level,
+                    output_format=options.format,
+                    output_file=str(output_path),
+                    # 进度条信息
+                    progress_info=f"{index + 1}/{len(input_files)}"
+                )
+                print(f"处理完成，输出文件：{output_path}")
         return 0
     except Exception as error:
         print(f"处理失败：{error}", file=sys.stderr)
