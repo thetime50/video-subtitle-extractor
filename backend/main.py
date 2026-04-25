@@ -32,6 +32,7 @@ from backend.tools.paddle_model_config import PaddleModelConfig
 from backend.tools.process_manager import ProcessManager
 from backend.tools.subtitle_detect import SubtitleDetect
 from backend.bean.subtitle_area import SubtitleArea
+from backend.tools.text_format import SubtitleFormatterRunner
 import threading
 import platform
 import multiprocessing
@@ -100,6 +101,8 @@ class SubtitleExtractor:
         self.vsf_running = False
         # 进度监听器列表
         self.progress_listeners = []
+        # 文本格式化器缓存
+        self._text_format_runner = None
 
     def run(self):
         """
@@ -195,7 +198,8 @@ class SubtitleExtractor:
         self.empty_cache()
         self.lock.release()
         if config.generateTxt.value:
-            self.srt2txt(self.subtitle_output_path)
+            # self.srt2txt(self.subtitle_output_path)
+            self.srt2txt_by_text_format(self.subtitle_output_path)
 
     def capture_frame_with_subtitle_area(self):
         """
@@ -1059,6 +1063,21 @@ class SubtitleExtractor:
         with open(output_path, 'w', encoding='utf-8') as f:
             for sub in subs:
                 f.write(f'{sub.text}\n')
+
+    def srt2txt_by_text_format(self, srt_file):
+        output_path = os.path.join(os.path.dirname(srt_file), Path(srt_file).stem + '.txt')
+        try:
+            if self._text_format_runner is None:
+                self._text_format_runner = SubtitleFormatterRunner()
+            self._text_format_runner.convert_file(
+                input_file=srt_file,
+                segment_level=2,
+                output_format='txt',
+                output_file=output_path,
+            )
+            self.append_output(output_path)
+        except Exception:
+            self.srt2txt(srt_file)
 
     def append_output(self, *args):
         """输出信息到控制台
