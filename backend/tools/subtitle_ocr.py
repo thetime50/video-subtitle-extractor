@@ -1,5 +1,7 @@
+import datetime
 import os
 import re
+from pathlib import Path
 from multiprocessing import Queue, Process
 import cv2
 from PIL import ImageFont, ImageDraw, Image
@@ -101,6 +103,7 @@ def extract_subtitles(data, text_recogniser:OcrRecogniser, img, raw_subtitles,
         sub_area = sub_area.clone()
         sub_area.ymin = sub_area.ymin - img.shape[0]
         sub_area.ymax = sub_area.ymax - img.shape[0]
+    drop_reasons = []
     for content, coordinate in zip(text_res, coordinates):
         text = content[0]
         prob = content[1]
@@ -159,7 +162,9 @@ def extract_subtitles(data, text_recogniser:OcrRecogniser, img, raw_subtitles,
                 elif font_size_too_small:
                     drop_reason = tr['Main']['OcrDropFontSizeTooSmall'].format((c_width, c_height), (sub_area.fwidth, sub_area.fheight))
             if drop_reason:
-                tqdm.write(tr['Main']['OcrResultWithDropReason'].format(text, round(prob * 100,1), drop_reason))
+                log_info = tr['Main']['OcrResultWithDropReason'].format(text, round(prob * 100,1), drop_reason)
+                tqdm.write(log_info)
+                drop_reasons.append(log_info)
             else:
                 tqdm.write(tr['Main']['OcrResult'].format(text, round(prob * 100,1)))
             # 保存丢掉的识别结果
@@ -168,6 +173,16 @@ def extract_subtitles(data, text_recogniser:OcrRecogniser, img, raw_subtitles,
         else:
             raw_subtitles.append(f'{str(data["i"]).zfill(8)}\t{coordinate}\t{text}\n')
     # 输出调试信息
+    if drop_reasons:
+        loss_path = Path(ocr_loss_debug_path).resolve()
+        loss_fname = loss_path.parent.name
+        loss_dir = loss_path.parents[1] / 'loss'
+        if not loss_dir.exists():
+            loss_dir.mkdir(mode=0o777, parents=True, exist_ok=True)
+        with open(loss_dir / f'{str(loss_fname).zfill(8)}.txt', 'w', encoding='utf-8') as f:
+   
+            f.write( f'time: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]}\n\n' +
+                '\n'.join(drop_reasons) + '\n\n')
     dump_debug_info(options, line, img, loss_list, ocr_loss_debug_path, sub_area, data)
 
 

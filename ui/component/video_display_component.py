@@ -692,9 +692,9 @@ class VideoDisplayComponent(QWidget):
                 self.form_rects_old = None
             else:
                 self.selection_rect.fymin = 0
-                self.selection_rect.fymax = 25/self.video_display.size().height()
+                self.selection_rect.fymax = 20/self.video_display.size().height()
                 self.selection_rect.fxmin = 0
-                self.selection_rect.fxmax = 25/self.video_display.size().width()
+                self.selection_rect.fxmax = 20/self.video_display.size().width()
             self.update_preview_with_rect()
         elif self.resize_edge and self.active_selection_index >= 0:  # 调整选择框大小或位置
             rect = self.selection_rects[self.active_selection_index]
@@ -927,8 +927,8 @@ class VideoDisplayComponent(QWidget):
                 parts = area.split(",")
                 ymin, ymax, xmin, xmax = map(float, parts)
                 selection_rects.append(SubtitleArea(ymin, ymax, xmin, xmax, 
-                    fymin=0, fymax=25/self.video_display.size().height(), 
-                    fxmin=0, fxmax=25/self.video_display.size().width()))
+                    fymin=0, fymax=20/self.video_display.size().height(), 
+                    fxmin=0, fxmax=20/self.video_display.size().width()))
             except ValueError:
                 continue
         
