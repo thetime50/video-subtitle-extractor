@@ -1065,7 +1065,7 @@ class SubtitleExtractor:
                 f.write(f'{sub.text}\n')
 
     def srt2txt_by_text_format(self, srt_file):
-        output_path = os.path.join(os.path.dirname(srt_file), Path(srt_file).stem + '.txt')
+        output_path = os.path.join(os.path.dirname(srt_file), Path(srt_file).stem + '.fmt.txt')
         try:
             if self._text_format_runner is None:
                 self._text_format_runner = SubtitleFormatterRunner()

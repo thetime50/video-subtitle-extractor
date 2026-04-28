@@ -1,4 +1,5 @@
 import argparse
+import difflib
 import json
 import queue
 import re
@@ -31,7 +32,7 @@ class FormatterOptions:
     format: str = "txt"
     model: str = "deepseek-chat"
     chunk_size: int = 2000
-    overlap_size: int = 120
+    overlap_size: int = 10
     timeout: int = 60
     retries: int = 3
 
@@ -165,9 +166,20 @@ class TextChunker:
         text_len = len(text)
         while cursor < text_len:
             core_end = min(cursor + self.chunk_size, text_len)
+            if core_end < text_len:
+                newline_pos = text.rfind("\n", cursor, core_end)
+                if newline_pos != -1:
+                    core_end = newline_pos + 1
             core_text = text[cursor:core_end]
-            context_before = text[max(0, cursor - self.overlap_size):cursor]
-            context_after = text[core_end:min(text_len, core_end + self.overlap_size)]
+            before_base_start = max(0, cursor - self.overlap_size)
+            before_newline = text.rfind("\n", 0, before_base_start)
+            context_before_start = 0 if before_newline == -1 else before_newline + 1
+            context_before = text[context_before_start:cursor]
+
+            after_base_end = min(text_len, core_end + self.overlap_size)
+            after_newline = text.find("\n", after_base_end)
+            context_after_end = text_len if after_newline == -1 else after_newline + 1
+            context_after = text[core_end:context_after_end]
             chunks.append(
                 Chunk(
                     index=index,
@@ -183,6 +195,64 @@ class TextChunker:
 
 class ChunkMerger:
     @staticmethod
+    def _is_separator(char: str) -> bool:
+        if char.isspace():
+            return True
+        return bool(re.match(r"[，。！？；：、,.!?;:\"'“”‘’()（）【】《》〈〉\[\]{}\-—_…]", char))
+
+    @staticmethod
+    def _normalize_with_mapping(text: str) -> tuple[str, List[int]]:
+        normalized_chars: List[str] = []
+        index_mapping: List[int] = []
+        for index, char in enumerate(text):
+            if ChunkMerger._is_separator(char):
+                if normalized_chars and normalized_chars[-1] == " ":
+                    continue
+                normalized_chars.append(" ")
+                index_mapping.append(index)
+                continue
+            normalized_chars.append(char.lower())
+            index_mapping.append(index)
+        return "".join(normalized_chars), index_mapping
+
+    @staticmethod
+    def _approx_overlap_by_context(
+        left: str,
+        right: str,
+        context_after: str,
+        context_before: str,
+    ) -> int:
+        base = max(len(context_after), len(context_before))
+        if base <= 0:
+            return 0
+        window_size = max(1, int(base * 1.2))
+        left_start = max(0, len(left) - window_size)
+        right_end = min(len(right), window_size)
+        left_window = left[left_start:]
+        right_window = right[:right_end]
+        if not left_window or not right_window:
+            return 0
+
+        normalized_left, left_map = ChunkMerger._normalize_with_mapping(left_window)
+        normalized_right, right_map = ChunkMerger._normalize_with_mapping(right_window)
+        if not normalized_left or not normalized_right:
+            return 0
+
+        limit = min(len(normalized_left), len(normalized_right))
+        for size in range(limit, 0, -1):
+            left_suffix = normalized_left[-size:]
+            right_prefix = normalized_right[:size]
+            left_compact = left_suffix.strip()
+            right_compact = right_prefix.strip()
+            if not left_compact or not right_compact:
+                continue
+            ratio = difflib.SequenceMatcher(None, left_suffix, right_prefix).ratio()
+            if ratio >= 0.9:
+                right_end_index = right_map[size - 1] + 1
+                return min(right_end_index, len(right))
+        return 0
+
+    @staticmethod
     def _longest_overlap(left: str, right: str, max_check: int = 80) -> int:
         limit = min(len(left), len(right), max_check)
         for size in range(limit, 0, -1):
@@ -190,13 +260,23 @@ class ChunkMerger:
                 return size
         return 0
 
-    def merge(self, parts: List[str]) -> str:
+    def merge(self, parts: List[str], content_after: List[str], content_before: List[str]) -> str:
         if not parts:
             return ""
         merged = parts[0]
-        for part in parts[1:]:
-            overlap = self._longest_overlap(merged, part)
+        for index, part in enumerate(parts[1:], start=1):
+            overlap = self._approx_overlap_by_context(
+                left=merged,
+                right=part,
+                context_after=content_after[index - 1] if index - 1 < len(content_after) else "",
+                context_before=content_before[index] if index < len(content_before) else "",
+            )
+            if overlap <= 0:
+                overlap = self._longest_overlap(merged, part)
             merged += part[overlap:]
+        # 完成合并后把合并边界的8个字符打印出来
+        boundary_text = ' | '.join([item[:8] for item in parts ])
+        print("边界：",boundary_text)
         return merged
 
 
@@ -314,7 +394,7 @@ class SubtitleFormatterService:
                 paragraphs.append(line)
         return "\n".join(paragraphs)
 
-    def format_text(self, text: str, segment_level: int, concurrency: int = 3, progress_info: str = "") -> Dict[str, object]:
+    def format_text(self, text: str, segment_level: int, concurrency: int = 5, progress_info: str = "") -> Dict[str, object]:
         original_text = text
         chunks = self.chunker.split(text)
         if not chunks:
@@ -341,7 +421,13 @@ class SubtitleFormatterService:
                 raise RuntimeError(f"第 {chunk.index + 1} 个分片返回空内容，已中止。")
             formatted_parts.append(normalized)
 
-        formatted_text = self.merger.merge(formatted_parts)
+        content_after_list = [chunk.context_after for chunk in chunks]
+        content_before_list = [chunk.context_before for chunk in chunks]
+        formatted_text = self.merger.merge(
+            parts=formatted_parts,
+            content_after=content_after_list,
+            content_before=content_before_list,
+        )
         elapsed_seconds = round(time.time() - start_time, 3)
         return {
             "original_text": original_text,
@@ -510,7 +596,8 @@ def collect_input_files(input_items: List[str]) -> List[Path]:
             continue
         if path.is_dir():
             for child in sorted(path.rglob("*")):
-                if child.is_file():
+                # 过滤 允许.srt .txt 排除 .fmt.txt
+                if child.is_file() and child.suffix in ['.srt', '.txt'] and child.suffix != '.fmt.txt':
                     file_paths.append(child)
             continue
         raise ValueError(f"不支持的输入路径类型：{path}")
