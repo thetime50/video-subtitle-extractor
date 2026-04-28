@@ -37,7 +37,7 @@ class FormatterOptions:
     retries: int = 3
 
     def __init__(self, args: argparse.Namespace):
-        raw_input = getattr(args, "input", [])
+        raw_input = getattr(args, "input", []) or getattr(args, "input_", [])
         if raw_input is None:
             self.input = []
         elif isinstance(raw_input, str):
@@ -554,7 +554,10 @@ def parse_args() -> argparse.Namespace:
         description="使用 DeepSeek 为字幕文本自动添加标点并分段。",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=42, width=120),
     )
-    parser.add_argument("--input", type=str, nargs="+", help="输入路径列表（文件或目录）。")
+    # 支持直接传入 file1.txt file2.txt file3.txt 作为位置参数
+    parser.add_argument('input_', nargs='*', help='输入文件列表（可选，等价于 --input）')
+    
+    parser.add_argument("--input", type=str, nargs="*", help="输入路径列表（文件或目录）。")
     parser.add_argument("--output", type=str, help="输出文件路径。")
     parser.add_argument("--segment-level", type=int, default=2, choices=[1, 2, 3], help="分段等级：1-粗 2-中 3-细。")
     parser.add_argument("--stdin", action="store_true", help="从标准输入读取文本。")
